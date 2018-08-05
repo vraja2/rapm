@@ -90,9 +90,9 @@ def get_stints_for_game(game_id):
       if is_turnover_event(pbp_row):
         print 'TURNOVER'
         possessions_in_stint += 1
-      #if is_violation_event(pbp_row):
-      #  print 'VIOLATION'
-      #  possessions_in_stint += 1
+      if is_violation_event(pbp_row):
+        print 'VIOLATION'
+        possessions_in_stint += 1
       player_id, curr_rebound_stats = parse_rebound_event(pbp_row)
       if player_id and curr_rebound_stats:
         prev_rebound_stats = rebounds_by_player[player_id]
