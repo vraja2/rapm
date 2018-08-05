@@ -22,6 +22,7 @@ HEADERS = {
 }
 ENDPOINT = 'http://stats.nba.com/stats/boxscoreadvancedv2?gameId={}&startPeriod=0&endPeriod=14&startRange={}&endRange={}&rangeType=2'
 
+FREE_THROW_REGEX = 'Free Throw (\d{1}) of (\d{1})'
 MADE_SHOT_REGEX = '\(\d+ PTS\)'
 REBOUND_REGEX = 'REBOUND \(Off:(\d+) Def:(\d+)\)'
 ReboundStats = namedtuple('ReboundStats', ['offensive', 'defensive'])
@@ -31,6 +32,7 @@ def get_stints_for_game(game_id):
   stint_lengths = []
   stint_margins = []
   stint_possessions = []
+  # TODO: figure out discrepancy in 26 possession stint
   with open(os.path.join('data', '{}.json'.format(game_id))) as pbp_data_file:
     # parse raw PBP data from stats.nba.com API, data for each game stored in separate files
     pbp_for_game_json = json.load(pbp_data_file)
@@ -46,7 +48,7 @@ def get_stints_for_game(game_id):
     prev_score_margin = 0
     possessions_in_stint = 0
     rebounds_by_player = defaultdict(lambda: ReboundStats(offensive=0, defensive=0))
-    prev_pbp_row = pd.Series([])
+    prev_pbp_row = pd.Series()
 
     # use changelog style approach to reflect substitutions
     for i, pbp_row in pbp_changelog_df.iterrows():
@@ -88,9 +90,9 @@ def get_stints_for_game(game_id):
       if is_turnover_event(pbp_row):
         print 'TURNOVER'
         possessions_in_stint += 1
-      if is_violation_event(pbp_row):
-        print 'VIOLATION'
-        possessions_in_stint += 1
+      #if is_violation_event(pbp_row):
+      #  print 'VIOLATION'
+      #  possessions_in_stint += 1
       player_id, curr_rebound_stats = parse_rebound_event(pbp_row)
       if player_id and curr_rebound_stats:
         prev_rebound_stats = rebounds_by_player[player_id]
@@ -103,10 +105,11 @@ def get_stints_for_game(game_id):
         possessions_in_stint += 1
       if is_team_defensive_rebound(pbp_row, prev_pbp_row):
         possessions_in_stint += 1
+      is_miss, current_free_throw, total_free_throws = parse_free_throw_event(pbp_row)
+      if current_free_throw and total_free_throws and current_free_throw == total_free_throws:
+        if not is_miss:
+          possessions_in_stint += 1
       prev_pbp_row = pbp_row
-      # TODO: free throw logic...
-      # if final free throw made, possession ends
-      # if final free throw is missed,
     print rebounds_by_player
     stint_length = get_period_end_seconds(prev_period) - prev_event_time_seconds
     stints.append(pd.DataFrame.copy(current_lineup_df))
@@ -121,6 +124,7 @@ def get_stints_for_game(game_id):
       print stint
       print 'Stint margin: {}'.format(stint_margins[k])
       print 'Stint possessions: {}'.format(stint_possessions[k])
+    print sum(stint_possessions)
 
 def convert_time_string_to_seconds(row):
   time_string = row['PCTIMESTRING']
@@ -169,6 +173,20 @@ def is_field_goal_event(pbp_row):
     match = re.search(MADE_SHOT_REGEX, pbp_row['VISITORDESCRIPTION'])
 
   return match
+
+def parse_free_throw_event(pbp_row):
+  match = None
+  is_miss = False
+  if pbp_row['HOMEDESCRIPTION']:
+    is_miss = 'MISS' in pbp_row['HOMEDESCRIPTION']
+    match = re.search(FREE_THROW_REGEX, pbp_row['HOMEDESCRIPTION'])
+  elif pbp_row['VISITORDESCRIPTION']:
+    is_miss = 'MISS' in pbp_row['VISITORDESCRIPTION']
+    match = re.search(FREE_THROW_REGEX, pbp_row['VISITORDESCRIPTION'])
+  if match:
+    return is_miss, int(match.group(1)), int(match.group(2))
+
+  return is_miss, None, None
 
 def get_stints_for_season(season):
   for game_num in range(1, NUM_GAMES_PER_SEASON + 1):
