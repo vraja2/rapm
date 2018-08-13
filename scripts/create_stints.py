@@ -27,14 +27,14 @@ MADE_SHOT_REGEX = '\(\d+ PTS\)'
 REBOUND_REGEX = 'REBOUND \(Off:(\d+) Def:(\d+)\)'
 ReboundStats = namedtuple('ReboundStats', ['offensive', 'defensive'])
 
-def get_stints_for_game(game_id):
+def get_stints_for_game(game_id, stints_df):
   stints = []
   stint_lengths = []
   stint_margins = []
   stint_possessions = []
   # TODO: figure out discrepancy in 26 possession stint
   with open(os.path.join('data', '{}.json'.format(game_id))) as pbp_data_file:
-    # parse raw PBP data from stats.nba.com API, data for each game stored in separate files
+    # parse raw PBP data from stats.nba.com API, data for each game stored in separate file
     pbp_for_game_json = json.load(pbp_data_file)
     pbp_table_headers = pbp_for_game_json['resultSets'][0]['headers']
     pbp_changelog_json = pbp_for_game_json['resultSets'][0]['rowSet']
@@ -44,6 +44,7 @@ def get_stints_for_game(game_id):
     # helper vars to keep track of state when populating stints
     prev_period = 0
     prev_event_time_seconds = None
+    # margins will be negative in favor of away team, positive in favor of home team
     starting_score_margin = 0
     prev_score_margin = 0
     possessions_in_stint = 0
@@ -52,7 +53,6 @@ def get_stints_for_game(game_id):
 
     # use changelog style approach to reflect substitutions
     for i, pbp_row in pbp_changelog_df.iterrows():
-      # print pbp_row
       parsed_margin = extract_score_margin(pbp_row)
       if parsed_margin:
         prev_score_margin = parsed_margin
@@ -64,11 +64,16 @@ def get_stints_for_game(game_id):
           # get lineup for start of period
           period_start = get_period_start_seconds(int(pbp_row['PERIOD']))
           period_start_scaled = period_start * 10
-          ranges = [(100, 150), (100, 200), (200, 300)]
+          ranges = [(100, 125), (125, 150), (100, 150), (150, 175), (175, 200), (150, 200), (100, 200), (200, 250), (250, 300), (200, 300), (300, 325), (325, 350), (300, 350), (300, 400)]
+          fetched_results = False
           for range in ranges:
             lineup_json = requests.get(ENDPOINT.format(game_id, period_start_scaled + range[0], period_start_scaled + range[1]), headers=HEADERS).json()
-            if len(lineup_json['resultSets'][0]['rowSet']) != 0:
+            if len(lineup_json['resultSets'][0]['rowSet']) == 10:
+              fetched_results = True
               break
+          if not fetched_results:
+            print '{} Failed'.format(game_id)
+            return
           df = pd.DataFrame(lineup_json['resultSets'][0]['rowSet'])
           df.columns = lineup_json['resultSets'][0]['headers']
           current_lineup_df = df[['PLAYER_ID', 'PLAYER_NAME']]
@@ -86,22 +91,17 @@ def get_stints_for_game(game_id):
         starting_score_margin = prev_score_margin
         current_lineup_df.loc[current_lineup_df['PLAYER_ID'] == pbp_row['PLAYER1_ID'], 'PLAYER_NAME'] = pbp_row['PLAYER2_NAME']
         current_lineup_df.loc[current_lineup_df['PLAYER_ID'] == pbp_row['PLAYER1_ID'], 'PLAYER_ID'] = pbp_row['PLAYER2_ID']
-      print pbp_row['PCTIMESTRING']
       if is_turnover_event(pbp_row):
-        print 'TURNOVER'
         possessions_in_stint += 1
       if is_violation_event(pbp_row):
-        print 'VIOLATION'
         possessions_in_stint += 1
       player_id, curr_rebound_stats = parse_rebound_event(pbp_row)
       if player_id and curr_rebound_stats:
         prev_rebound_stats = rebounds_by_player[player_id]
         if is_player_defensive_rebound(prev_rebound_stats, curr_rebound_stats):
-          print 'DEFENSIVE REBOUND'
           possessions_in_stint += 1
         rebounds_by_player[player_id] = curr_rebound_stats
       if is_field_goal_event(pbp_row):
-        print 'FIELD GOAL'
         possessions_in_stint += 1
       if is_team_defensive_rebound(pbp_row, prev_pbp_row):
         possessions_in_stint += 1
@@ -110,21 +110,23 @@ def get_stints_for_game(game_id):
         if not is_miss:
           possessions_in_stint += 1
       prev_pbp_row = pbp_row
-    print rebounds_by_player
     stint_length = get_period_end_seconds(prev_period) - prev_event_time_seconds
     stints.append(pd.DataFrame.copy(current_lineup_df))
     stint_lengths.append(stint_length)
     stint_margins.append(prev_score_margin - starting_score_margin)
     # game ending signifies one last possession
     stint_possessions.append(possessions_in_stint + 1)
+    num_rows, _ = stints_df.shape
+    i = 0
     for k, stint in enumerate(stints):
-      if stint_lengths[k] == 0:
-        continue
-      print 'Stint length: {}'.format(stint_lengths[k])
-      print stint
-      print 'Stint margin: {}'.format(stint_margins[k])
-      print 'Stint possessions: {}'.format(stint_possessions[k])
-    print sum(stint_possessions)
+      #if stint_lengths[k] == 0:
+      #  continue
+      # print stint
+      # print 'Stint length: {}'.format(stint_lengths[k])
+      # print 'Stint margin: {}'.format(stint_margins[k])
+      # print 'Stint possessions: {}'.format(stint_possessions[k])
+      stints_df.loc[len(stints_df)] = pd.concat([stint['PLAYER_ID'], pd.Series([stint_lengths[k], stint_possessions[k], stint_margins[k]])], ignore_index=True).values
+      i += 1
 
 def convert_time_string_to_seconds(row):
   time_string = row['PCTIMESTRING']
@@ -188,10 +190,6 @@ def parse_free_throw_event(pbp_row):
 
   return is_miss, None, None
 
-def get_stints_for_season(season):
-  for game_num in range(1, NUM_GAMES_PER_SEASON + 1):
-    get_stints_for_game('002{:02}0{:04}'.format(season, game_num))
-
 def get_period_start_seconds(period):
   if period > 4:
     return 720 * 4 + (period - 1 - 4) * (5 * 60)
@@ -229,13 +227,24 @@ def is_team_defensive_rebound(curr_pbp_row, prev_pbp_row):
 
   return False
 
+def get_stints_for_season(season, stints_df):
+  for game_num in range(1, NUM_GAMES_PER_SEASON + 1):
+    print '002{:02}0{:04}'.format(season, game_num)
+    get_stints_for_game('002{:02}0{:04}'.format(season, game_num), stints_df)
+
 def main():
-  if not os.path.exists('data'):
-    os.makedirs('data')
+  col_names = ['AWAY_P1_ID', 'AWAY_P2_ID', 'AWAY_P3_ID', 'AWAY_P4_ID', 'AWAY_P5_ID', 'HOME_P1_ID', 'HOME_P2_ID', 'HOME_P3_ID', 'HOME_P4_ID', 'HOME_P5_ID', 'TIME_SECONDS', 'POSSESSIONS', 'MARGIN']
+  stints_df = pd.DataFrame(columns=col_names)
   seasons = range(17, 18)
   for season in seasons:
-    get_stints_for_season(season)
+    get_stints_for_season(season, stints_df)
+  stints_df.to_pickle('2017_18_stints.pkl')
 
 if __name__ == '__main__':
-  get_stints_for_game('0021700002')
-  # main()
+  # col_names = ['AWAY_P1_ID', 'AWAY_P2_ID', 'AWAY_P3_ID', 'AWAY_P4_ID', 'AWAY_P5_ID', 'HOME_P1_ID', 'HOME_P2_ID', 'HOME_P3_ID', 'HOME_P4_ID', 'HOME_P5_ID', 'TIME_SECONDS', 'POSSESSIONS', 'MARGIN']
+  # stints_df = pd.DataFrame(columns=col_names)
+  # games = ['0021700346', '0021700347']
+  # for game in games:
+  #   print game
+  #   get_stints_for_game(game, stints_df)
+  main()
